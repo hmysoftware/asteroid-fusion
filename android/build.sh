@@ -20,7 +20,7 @@ PLATFORM_JAR=$SDK/platforms/android-34/android.jar
 API=26
 TARGET=34
 VNAME=$(sed -n 's/^#define AFX_VERSION "\(.*\)"/\1/p' src/afx.h)
-VCODE=${VCODE:-2}
+VCODE=${VCODE:-3}
 ABIS=${ABIS:-"arm64-v8a armeabi-v7a x86_64"}
 OUT=build-android
 DIST=dist
@@ -67,7 +67,7 @@ for abi in $ABIS; do build_abi "$abi"; done
 # ---- resource (ikon) + assets (font) + manifest ----
 [ -d android/res ] || python3 android/make_icon.py
 $BT/aapt2 compile --dir android/res -o "$OUT/res.zip"
-$BT/aapt2 link -o "$OUT/base.apk" --manifest android/AndroidManifest.xml -I "$PLATFORM_JAR" -R "$OUT/res.zip" \
+$BT/aapt2 link --auto-add-overlay -o "$OUT/base.apk" --manifest android/AndroidManifest.xml -I "$PLATFORM_JAR" -R "$OUT/res.zip" \
   -A assets --min-sdk-version $API --target-sdk-version $TARGET --version-code "$VCODE" --version-name "$VNAME"
 cp "$OUT/base.apk" "$OUT/unaligned.apk"
 (cd "$OUT/stage" && zip -0 -X -r ../unaligned.apk lib >/dev/null)

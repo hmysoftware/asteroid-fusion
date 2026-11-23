@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define AFX_VERSION "2.0.0"
+#define AFX_VERSION "2.0.1"
 #define AFX_NAME "Asteroid Fusion"
 #ifndef AFX_ASSET_DIR
 #define AFX_ASSET_DIR "assets"   /* fallback asset dir (CMake overrides it on desktop) */
@@ -213,6 +213,9 @@ void render_comp(Project *P, float t, FBuf *out);
 void par_rows(int rows, void (*fn)(int, int, void *), void *ctx);
 void fbuf_to_rgba8(const FBuf *b, uint8_t *dst, bool flatten_black);
 const char *afx_find_asset(const char *rel, char *buf, size_t cap);
+/* Android: copy a finished export into the shared gallery folders (Movies/AsteroidFusion, Pictures/AsteroidFusion).
+ * Returns true and fills `where` with a human readable location; desktop builds return false and leave the file where it is. */
+bool platform_publish_file(const char *path, char *where, size_t cap);
 extern const char *afx_asset_root;   /* optional override dir containing fonts/ (Android: extracted assets) */
 
 /* ---------- script.c ---------- */

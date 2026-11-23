@@ -68,6 +68,10 @@ typedef struct {
     EGLSurface surface;                 // Surface to draw on, framebuffers (connected to context)
     EGLContext context;                 // Graphic context, mode in which drawing can be done
     EGLConfig config;                   // Graphic config
+
+    int afxDirtyFrames;                 // AFX: frames left until a forced surface rebuild (set by config/resize events)
+    int afxMismatch;                    // AFX: consecutive frames where the EGL surface size differs from the native window size
+    int afxTries, afxLastW, afxLastH;   // AFX: automatic rebuilds already tried for the current window size
 } PlatformData;
 
 //----------------------------------------------------------------------------------
@@ -640,6 +644,24 @@ const char *GetKeyName(int key)
     return "";
 }
 
+// AFX: recreate the EGL window surface so its buffers match the native window again (after rotation / resize / multi-window)
+static void AfxRebuildSurface(void)
+{
+    if (platform.device == EGL_NO_DISPLAY || platform.app->window == NULL) return;
+    eglMakeCurrent(platform.device, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (platform.surface != EGL_NO_SURFACE) { eglDestroySurface(platform.device, platform.surface); platform.surface = EGL_NO_SURFACE; }
+    EGLint fmt = 0;
+    eglGetConfigAttrib(platform.device, platform.config, EGL_NATIVE_VISUAL_ID, &fmt);
+    ANativeWindow_setBuffersGeometry(platform.app->window, 0, 0, fmt);
+    platform.surface = eglCreateWindowSurface(platform.device, platform.config, platform.app->window, NULL);
+    if (platform.surface == EGL_NO_SURFACE || eglMakeCurrent(platform.device, platform.surface, platform.surface, platform.context) == EGL_FALSE)
+    {
+        TRACELOG(LOG_WARNING, "ANDROID: surface rebuild failed");
+        platform.surface = EGL_NO_SURFACE;
+        platform.contextRebindRequired = true;
+    }
+}
+
 // Register all input events
 void PollInputEvents(void)
 {
@@ -704,6 +726,26 @@ void PollInputEvents(void)
     }
 
     // AFX patch: follow native surface size changes (screen rotation / multi-window)
+    if (platform.surface != EGL_NO_SURFACE && platform.device != EGL_NO_DISPLAY && platform.app->window != NULL)
+    {
+        // 1) a config/resize event asked for a rebuild a few frames ago (the window has settled by now)
+        // 2) the native window (system layout) and the EGL surface disagree for several frames: the buffers are stale and get stretched
+        int ww = ANativeWindow_getWidth(platform.app->window), wh = ANativeWindow_getHeight(platform.app->window);
+        EGLint qw = 0, qh = 0;
+        bool stale = false;
+        if (eglQuerySurface(platform.device, platform.surface, EGL_WIDTH, &qw) && eglQuerySurface(platform.device, platform.surface, EGL_HEIGHT, &qh))
+            stale = (ww > 0 && wh > 0 && (qw != ww || qh != wh));
+        if (ww != platform.afxLastW || wh != platform.afxLastH) { platform.afxLastW = ww; platform.afxLastH = wh; platform.afxTries = 0; }
+        if (!stale) platform.afxTries = 0;
+        platform.afxMismatch = stale ? platform.afxMismatch + 1 : 0;
+        bool force = platform.afxDirtyFrames > 0 && --platform.afxDirtyFrames == 0;
+        if (force || (platform.afxMismatch >= 3 && platform.afxTries < 2))      // never loop forever if the driver reports a different size on purpose
+        {
+            if (!force) platform.afxTries++;
+            platform.afxMismatch = 0;
+            AfxRebuildSurface();
+        }
+    }
     if (platform.surface != EGL_NO_SURFACE && platform.device != EGL_NO_DISPLAY)
     {
         EGLint sw = 0, sh = 0;
@@ -735,7 +777,7 @@ int InitPlatform(void)
     CORE.Window.currentFbo.height = CORE.Window.screen.height;
 
     // Set desired windows flags before initializing anything
-    ANativeActivity_setWindowFlags(platform.app->activity, AWINDOW_FLAG_FULLSCREEN, 0);  //AWINDOW_FLAG_SCALED, AWINDOW_FLAG_DITHER
+    ANativeActivity_setWindowFlags(platform.app->activity, 0, AWINDOW_FLAG_FULLSCREEN);   // AFX: not fullscreen, the system keeps the app clear of the status/navigation bars  //AWINDOW_FLAG_SCALED, AWINDOW_FLAG_DITHER
 
     int orientation = AConfiguration_getOrientation(platform.app->config);
 
@@ -1098,8 +1140,14 @@ static void AndroidCommandCallback(struct android_app *app, int32_t cmd)
         case APP_CMD_SAVE_STATE: break;
         case APP_CMD_STOP: break;
         case APP_CMD_DESTROY: break;
+        case APP_CMD_WINDOW_RESIZED:
+        case APP_CMD_CONTENT_RECT_CHANGED:
+        {
+            platform.afxDirtyFrames = 8;        // AFX: rebuild the surface once the new window size has settled
+        } break;
         case APP_CMD_CONFIG_CHANGED:
         {
+            platform.afxDirtyFrames = 8;
             //AConfiguration_fromAssetManager(platform.app->config, platform.app->activity->assetManager);
             //print_cur_config(platform.app);
 

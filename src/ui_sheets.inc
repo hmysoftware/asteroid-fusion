@@ -580,7 +580,7 @@ static void sheet_script(Rectangle body) {
 /* ============================== EXPORT ============================== */
 static int exp_fmt, exp_scale = 100, exp_quality = 80, exp_from, exp_to;
 static bool exp_custom_range, ffmpeg_ok;
-static char exp_name[64] = "";
+static char exp_name[64] = "", exp_last[PATH_LEN] = "";
 static ExportJob *job;
 static const char *EXP_NAMES[6] = { "GIF", "MP4", "WebM", "AVI", "PNG frame", "JPG frame" };
 static const char *EXP_EXT[6] = { "gif", "mp4", "webm", "avi", "png", "jpg" };
@@ -592,9 +592,14 @@ static void export_start(void) {
     if (!exp_name[0]) exp_default_name();
     char path[PATH_LEN], err[200] = { 0 };
     snprintf(path, sizeof path, "%s/%s.%s", proj_dir, exp_name, EXP_EXT[exp_fmt]);
+    snprintf(exp_last, sizeof exp_last, "%s", path);
     if (exp_fmt >= 4) {
         int fr = (int)floorf(cur_t * P->fps + 0.5f);
-        if (export_frame_image(P, fr, path, exp_quality, err, sizeof err)) { afx_log(0, "saved frame %d -> %s", fr, path); set_status(0, "Saved %s", path); }
+        if (export_frame_image(P, fr, path, exp_quality, err, sizeof err)) {
+            char where[160];
+            if (platform_publish_file(path, where, sizeof where)) { afx_log(0, "saved frame %d -> %s", fr, where); set_status(0, "Saved to %s", where); }
+            else { afx_log(0, "saved frame %d -> %s", fr, path); set_status(0, "Saved %s", path); }
+        }
         else afx_log(1, "%s", err);
         return;
     }
@@ -610,7 +615,12 @@ static void export_tick(void) {
     if (r <= 0) {
         char msg[256]; snprintf(msg, sizeof msg, "%s", export_error(job));
         export_end(job, r < 0); job = NULL;
-        if (r < 0 || msg[0]) afx_log(1, "export failed: %s", msg); else { afx_log(0, "export finished"); set_status(0, "Export finished: %s", proj_dir); }
+        if (r < 0 || msg[0]) afx_log(1, "export failed: %s", msg);
+        else {
+            char where[160];
+            if (platform_publish_file(exp_last, where, sizeof where)) { afx_log(0, "export finished -> %s", where); set_status(0, "Saved to %s", where); }
+            else { afx_log(0, "export finished -> %s", exp_last); set_status(0, "Export finished: %s", exp_last); }
+        }
     }
 }
 static void sheet_export(Rectangle body) {
@@ -618,8 +628,18 @@ static void sheet_export(Rectangle body) {
     float pad = D(16), x = body.x + pad, w = body.width - 2 * pad, y = scroll_begin(body, s) + D(4), nv;
     section(&y, x, "FORMAT");
     int hit = chip_grid(&y, x, w, EXP_NAMES, 6, 3, exp_fmt);
-    if (hit >= 0) { if (hit >= 1 && hit <= 3 && !ffmpeg_ok) set_status(1, "ffmpeg not available: use GIF or a frame export"); else exp_fmt = hit; }
-    if (!ffmpeg_ok) { dtext_fit(F, "MP4/WebM/AVI need ffmpeg (not on this device). GIF and frames work.", (Rectangle){ x, y, w, D(34) }, T_SMALL, C_ACC, 0); y += D(36); }
+    bool native_mp4 = false;
+#ifdef PLATFORM_ANDROID
+    native_mp4 = true;                                   /* MediaCodec + MediaMuxer */
+#endif
+    if (hit >= 0) {
+        bool ok = hit == 0 || hit >= 4 || ffmpeg_ok || (hit == 1 && native_mp4);
+        if (!ok) set_status(1, native_mp4 ? "WebM/AVI need ffmpeg: use MP4, GIF or a frame export" : "ffmpeg not available: use GIF or a frame export");
+        else exp_fmt = hit;
+    }
+    if (!ffmpeg_ok) {
+        dtext_fit(F, native_mp4 ? "MP4 (video only), GIF and frames work on this device." : "MP4/WebM/AVI need ffmpeg (not found). GIF and frames work.", (Rectangle){ x, y, w, D(34) }, T_SMALL, C_ACC, 0); y += D(36);
+    }
     y += D(4);
     if (exp_fmt < 4) {
         if (slider_row(900200, "Scale %", (float)exp_scale, 10, 200, 10, 400, x, y, w, &nv)) exp_scale = (int)nv;

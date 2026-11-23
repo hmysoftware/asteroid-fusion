@@ -80,9 +80,12 @@ static void android_request_media_access(struct android_app *app) {
     if (!cact || !cver || !cstr) { (*env)->ExceptionClear(env); (*vm)->DetachCurrentThread(vm); return; }
     jfieldID fsdk = (*env)->GetStaticFieldID(env, cver, "SDK_INT", "I");
     int sdk = fsdk ? (*env)->GetStaticIntField(env, cver, fsdk) : 0;
-    const char *want[2]; int nw = 0;
+    const char *want[3]; int nw = 0;
     if (sdk >= 33) { want[nw++] = "android.permission.READ_MEDIA_VIDEO"; want[nw++] = "android.permission.READ_MEDIA_IMAGES"; }
-    else if (sdk >= 23) want[nw++] = "android.permission.READ_EXTERNAL_STORAGE";
+    else if (sdk >= 23) {
+        want[nw++] = "android.permission.READ_EXTERNAL_STORAGE";
+        if (sdk < 29) want[nw++] = "android.permission.WRITE_EXTERNAL_STORAGE";      /* only Android 6-9 need it to write Movies/ directly */
+    }
     if (nw) {
         jmethodID mcheck = (*env)->GetMethodID(env, cact, "checkSelfPermission", "(Ljava/lang/String;)I");
         jmethodID mreq = (*env)->GetMethodID(env, cact, "requestPermissions", "([Ljava/lang/String;I)V");
@@ -99,6 +102,124 @@ static void android_request_media_access(struct android_app *app) {
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     (*vm)->DetachCurrentThread(vm);
 }
+#endif
+
+
+/* ---------- publish exports to the gallery ---------- */
+#ifdef PLATFORM_ANDROID
+#define JX(call) ((call), (*env)->ExceptionCheck(env) ? ((*env)->ExceptionClear(env), 1) : 0)
+static bool copy_to_movies_legacy(const char *path, const char *rel, const char *name, char *where, size_t cap) {
+    char dir[PATH_LEN], dst[PATH_LEN * 2];
+    snprintf(dir, sizeof dir, "/storage/emulated/0/%s", rel);
+    char tmp[PATH_LEN]; snprintf(tmp, sizeof tmp, "/storage/emulated/0/%s", rel);
+    for (char *p = tmp + 1; *p; p++) if (*p == '/') { *p = 0; mkdir(tmp, 0775); *p = '/'; }
+    mkdir(dir, 0775);
+    snprintf(dst, sizeof dst, "%s/%s", dir, name);
+    FILE *fi = fopen(path, "rb"), *fo = fopen(dst, "wb");
+    if (!fi || !fo) { if (fi) fclose(fi); if (fo) fclose(fo); return false; }
+    static char buf[1 << 16]; size_t n; bool ok = true;
+    while ((n = fread(buf, 1, sizeof buf, fi)) > 0) if (fwrite(buf, 1, n, fo) != n) { ok = false; break; }
+    fclose(fi); if (fclose(fo) != 0) ok = false;
+    if (ok) snprintf(where, cap, "%s/%s", rel, name); else remove(dst);
+    return ok;
+}
+
+bool platform_publish_file(const char *path, char *where, size_t cap) {
+    struct android_app *app = GetAndroidApp();
+    const char *name = strrchr(path, '/'); name = name ? name + 1 : path;
+    const char *ext = strrchr(name, '.'); ext = ext ? ext + 1 : "";
+    bool video = !strcasecmp(ext, "mp4") || !strcasecmp(ext, "webm") || !strcasecmp(ext, "avi");
+    const char *mime = !strcasecmp(ext, "mp4") ? "video/mp4" : !strcasecmp(ext, "webm") ? "video/webm" : !strcasecmp(ext, "avi") ? "video/x-msvideo" :
+                       !strcasecmp(ext, "gif") ? "image/gif" : !strcasecmp(ext, "png") ? "image/png" : "image/jpeg";
+    const char *rel = video ? "Movies/AsteroidFusion" : "Pictures/AsteroidFusion";
+    JavaVM *vm = app->activity->vm; JNIEnv *env = NULL; bool attached = false, ok = false;
+    jint gs = (*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6);
+    if (gs == JNI_EDETACHED) { if ((*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) return false; attached = true; }
+    else if (gs != JNI_OK || !env) return false;
+
+    jclass cver = (*env)->FindClass(env, "android/os/Build$VERSION");
+    jfieldID fsdk = cver ? (*env)->GetStaticFieldID(env, cver, "SDK_INT", "I") : NULL;
+    int sdk = fsdk ? (*env)->GetStaticIntField(env, cver, fsdk) : 0;
+    (*env)->ExceptionClear(env);
+    if (sdk < 29) { ok = copy_to_movies_legacy(path, rel, name, where, cap); goto done; }
+
+    {
+        jobject ctx = app->activity->clazz;
+        jclass cCtx = (*env)->FindClass(env, "android/content/Context");
+        jclass cCR = (*env)->FindClass(env, "android/content/ContentResolver");
+        jclass cCV = (*env)->FindClass(env, "android/content/ContentValues");
+        jclass cInt = (*env)->FindClass(env, "java/lang/Integer");
+        jclass cOS = (*env)->FindClass(env, "java/io/OutputStream");
+        jclass cColl = (*env)->FindClass(env, video ? "android/provider/MediaStore$Video$Media" : "android/provider/MediaStore$Images$Media");
+        if ((*env)->ExceptionCheck(env) || !cCtx || !cCR || !cCV || !cInt || !cOS || !cColl) { (*env)->ExceptionClear(env); goto done; }
+        jmethodID mGetCR = (*env)->GetMethodID(env, cCtx, "getContentResolver", "()Landroid/content/ContentResolver;");
+        jmethodID mInsert = (*env)->GetMethodID(env, cCR, "insert", "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;");
+        jmethodID mOpen = (*env)->GetMethodID(env, cCR, "openOutputStream", "(Landroid/net/Uri;)Ljava/io/OutputStream;");
+        jmethodID mUpdate = (*env)->GetMethodID(env, cCR, "update", "(Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I");
+        jmethodID mDelete = (*env)->GetMethodID(env, cCR, "delete", "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I");
+        jmethodID mCVnew = (*env)->GetMethodID(env, cCV, "<init>", "()V");
+        jmethodID mPutS = (*env)->GetMethodID(env, cCV, "put", "(Ljava/lang/String;Ljava/lang/String;)V");
+        jmethodID mPutI = (*env)->GetMethodID(env, cCV, "put", "(Ljava/lang/String;Ljava/lang/Integer;)V");
+        jmethodID mValueOf = (*env)->GetStaticMethodID(env, cInt, "valueOf", "(I)Ljava/lang/Integer;");
+        jmethodID mWrite = (*env)->GetMethodID(env, cOS, "write", "([BII)V");
+        jmethodID mClose = (*env)->GetMethodID(env, cOS, "close", "()V");
+        jfieldID fUri = (*env)->GetStaticFieldID(env, cColl, "EXTERNAL_CONTENT_URI", "Landroid/net/Uri;");
+        if ((*env)->ExceptionCheck(env) || !mGetCR || !mInsert || !mOpen || !mUpdate || !mDelete || !mCVnew || !mPutS || !mPutI || !mValueOf || !mWrite || !mClose || !fUri) { (*env)->ExceptionClear(env); goto done; }
+
+        jobject cr = (*env)->CallObjectMethod(env, ctx, mGetCR);
+        jobject coll = (*env)->GetStaticObjectField(env, cColl, fUri);
+        jobject cv = (*env)->NewObject(env, cCV, mCVnew);
+        if ((*env)->ExceptionCheck(env) || !cr || !coll || !cv) { (*env)->ExceptionClear(env); goto done; }
+        char relpath[96]; snprintf(relpath, sizeof relpath, "%s/", rel);
+        jstring k1 = (*env)->NewStringUTF(env, "_display_name"), v1 = (*env)->NewStringUTF(env, name);
+        jstring k2 = (*env)->NewStringUTF(env, "mime_type"), v2 = (*env)->NewStringUTF(env, mime);
+        jstring k3 = (*env)->NewStringUTF(env, "relative_path"), v3 = (*env)->NewStringUTF(env, relpath);
+        jstring k4 = (*env)->NewStringUTF(env, "is_pending");
+        jobject one = (*env)->CallStaticObjectMethod(env, cInt, mValueOf, 1), zero = (*env)->CallStaticObjectMethod(env, cInt, mValueOf, 0);
+        (*env)->CallVoidMethod(env, cv, mPutS, k1, v1); (*env)->CallVoidMethod(env, cv, mPutS, k2, v2);
+        (*env)->CallVoidMethod(env, cv, mPutS, k3, v3); (*env)->CallVoidMethod(env, cv, mPutI, k4, one);
+        if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); goto done; }
+
+        jobject uri = (*env)->CallObjectMethod(env, cr, mInsert, coll, cv);
+        if ((*env)->ExceptionCheck(env) || !uri) { (*env)->ExceptionClear(env); goto done; }
+        jobject os = (*env)->CallObjectMethod(env, cr, mOpen, uri);
+        bool wrote = false;
+        if (!(*env)->ExceptionCheck(env) && os) {
+            FILE *fi = fopen(path, "rb");
+            jbyteArray arr = (*env)->NewByteArray(env, 1 << 18);
+            static unsigned char buf[1 << 18];
+            if (fi && arr) {
+                size_t n; wrote = true;
+                while (wrote && (n = fread(buf, 1, sizeof buf, fi)) > 0) {
+                    (*env)->SetByteArrayRegion(env, arr, 0, (jsize)n, (const jbyte *)buf);
+                    (*env)->CallVoidMethod(env, os, mWrite, arr, 0, (jint)n);
+                    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); wrote = false; }
+                }
+            }
+            if (fi) fclose(fi);
+            (*env)->CallVoidMethod(env, os, mClose);
+            if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); wrote = false; }
+        } else (*env)->ExceptionClear(env);
+        if (wrote) {
+            jobject cv2 = (*env)->NewObject(env, cCV, mCVnew);
+            (*env)->CallVoidMethod(env, cv2, mPutI, k4, zero);
+            (*env)->CallIntMethod(env, cr, mUpdate, uri, cv2, NULL, NULL);
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            snprintf(where, cap, "%s/%s", rel, name);
+            ok = true;
+        } else {
+            (*env)->CallIntMethod(env, cr, mDelete, uri, NULL, NULL);
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        }
+    }
+done:
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (attached) (*vm)->DetachCurrentThread(vm);
+    if (ok) remove(path);                  /* the gallery copy is the export now; do not keep a second one in the app folder */
+    return ok;
+}
+#else
+bool platform_publish_file(const char *path, char *where, size_t cap) { (void)path; (void)where; (void)cap; return false; }
 #endif
 
 int main(int argc, char **argv) {
@@ -142,7 +263,11 @@ int main(int argc, char **argv) {
             char a[96], o[PATH_LEN]; int n = 0;
             snprintf(a, sizeof a, "fonts/%s", fn[i]); snprintf(o, sizeof o, "%s/fonts/%s", root, fn[i]);
             unsigned char *dt = LoadFileData(a, &n);
-            if (dt) { SaveFileData(o, dt, n); UnloadFileData(dt); }
+            if (dt) {
+                FILE *fo = fopen(o, "wb");           /* plain libc: raylib's SaveFileData() prepends internalDataPath to the name */
+                if (fo) { fwrite(dt, 1, (size_t)n, fo); fclose(fo); }
+                UnloadFileData(dt);
+            }
         }
         afx_asset_root = root;
         snprintf(afx_cache_dir, sizeof afx_cache_dir, "%s/videocache", app->activity->internalDataPath); mkdir(afx_cache_dir, 0755);

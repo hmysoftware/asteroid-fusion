@@ -33,7 +33,7 @@ Native C (raylib + Lua 5.4 + NanoSVG), no Java, no Gradle. Formerly **HMY AFX**.
 | Android `MediaCodec` import, `MediaCodec`/`MediaMuxer` export, media permission prompt | implemented, **untested on hardware**: please report device + Android version when something fails |
 | Android export audio | not implemented (video track only) |
 | Audio preview while editing | not implemented (audio is mixed at export time only) |
-| Saving exports to the gallery | not implemented; files go to the app's project folder |
+| Saving exports to the gallery | Android 10+: MediaStore into `Movies/AsteroidFusion` (videos) and `Pictures/AsteroidFusion` (GIF/PNG/JPG); Android 8-9: direct copy. Written from reports of the first device test, still unverified |
 
 ## Build
 
