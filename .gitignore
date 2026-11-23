@@ -1,0 +1,11 @@
+build/
+build-*/
+dist/
+*.apk
+*.idsig
+android/release.keystore
+android/keystore.pass
+android/*.jks
+projects/*
+!projects/.gitkeep
+.cache/
